@@ -43,6 +43,7 @@ const global = @import("../../../global.zig");
 const gtk_version = @import("../gtk_version.zig");
 const Overrides = @import("Overrides.zig");
 const scale_util = @import("../scale.zig");
+const TouchGesture = @import("../TouchGesture.zig");
 const DesktopNotifications = @import("../desktop_notifications.zig");
 
 const log = std.log.scoped(.gtk_ghostty_surface);
@@ -743,6 +744,9 @@ pub const Surface = extern struct {
         /// True when a left mouse down was consumed purely for a focus change,
         /// and the matching left mouse release should also be suppressed.
         suppress_left_mouse_release: bool = false,
+
+        touch_gesture: TouchGesture = .{},
+        touch_hold_timer: ?c_uint = null,
 
         /// How much pending horizontal scroll do we have?
         pending_horizontal_scroll: f64 = 0.0,
@@ -1892,6 +1896,7 @@ pub const Surface = extern struct {
 
     fn dispose(self: *Self) callconv(.c) void {
         const priv = self.private();
+        self.cancelTouch();
 
         self.clearDesktopNotifications();
 
@@ -2920,6 +2925,176 @@ pub const Surface = extern struct {
         };
     }
 
+    fn isTouchEvent(event: *gdk.Event) bool {
+        const device = event.getDevice() orelse return false;
+        return device.getSource() == .touchscreen;
+    }
+
+    fn setTouchPosition(self: *Self, point: TouchGesture.Point) void {
+        const scaled = self.scaledCoordinates(point.x, point.y);
+        self.private().cursor_pos = .{
+            .x = @floatCast(scaled.x),
+            .y = @floatCast(scaled.y),
+        };
+    }
+
+    fn cancelTouchTimer(self: *Self) void {
+        const priv = self.private();
+        if (priv.touch_hold_timer) |timer| {
+            _ = glib.Source.remove(timer);
+            priv.touch_hold_timer = null;
+        }
+    }
+
+    fn releaseTouchSelection(self: *Self, point: TouchGesture.Point) void {
+        const surface = self.private().core_surface orelse return;
+        defer surface.mouse_selection_override = false;
+        self.setTouchPosition(point);
+        _ = surface.mouseButtonCallback(.release, .left, .{}) catch |err| {
+            log.warn("error releasing touch selection err={}", .{err});
+            return;
+        };
+    }
+
+    fn cancelTouch(self: *Self) void {
+        self.cancelTouchTimer();
+        switch (self.private().touch_gesture.cancel()) {
+            .release_selection => |point| self.releaseTouchSelection(point),
+            .none => {},
+            .tap => unreachable,
+        }
+    }
+
+    fn gcTouchBegin(
+        gesture: *gtk.GestureDrag,
+        x: f64,
+        y: f64,
+        self: *Self,
+    ) callconv(.c) void {
+        const event = gesture.as(gtk.EventController).getCurrentEvent() orelse return;
+        switch (event.getEventType()) {
+            .touch_begin, .button_press => {},
+            else => {
+                _ = gesture.as(gtk.Gesture).setState(.denied);
+                return;
+            },
+        }
+        self.cancelTouch();
+        const priv = self.private();
+        if (priv.core_surface == null) return;
+        self.setBellRinging(false);
+        _ = priv.render_surface.as(gtk.Widget).grabFocus();
+        priv.touch_gesture.begin(.{ .x = x, .y = y });
+        _ = gesture.as(gtk.Gesture).setState(.claimed);
+        priv.touch_hold_timer = glib.timeoutAdd(TouchGesture.hold_milliseconds, touchHold, self);
+    }
+
+    fn touchHold(data: ?*anyopaque) callconv(.c) c_int {
+        const self: *Self = @ptrCast(@alignCast(data orelse return glib.SOURCE_REMOVE));
+        const priv = self.private();
+        priv.touch_hold_timer = null;
+        const surface = priv.core_surface orelse return glib.SOURCE_REMOVE;
+        const point = priv.touch_gesture.hold() orelse return glib.SOURCE_REMOVE;
+        self.setTouchPosition(point);
+        surface.mouse_selection_override = true;
+        surface.cursorPosCallback(priv.cursor_pos, .{}) catch |err| {
+            log.warn("error positioning touch selection err={}", .{err});
+            self.cancelTouch();
+            return glib.SOURCE_REMOVE;
+        };
+        _ = surface.mouseButtonCallback(.press, .left, .{}) catch |err| {
+            log.warn("error starting touch selection err={}", .{err});
+            self.cancelTouch();
+            return glib.SOURCE_REMOVE;
+        };
+        return glib.SOURCE_REMOVE;
+    }
+
+    fn updateTouch(self: *Self, offset_x: f64, offset_y: f64) void {
+        const priv = self.private();
+        const surface = priv.core_surface orelse return;
+        const point: TouchGesture.Point = .{
+            .x = priv.touch_gesture.origin.x + offset_x,
+            .y = priv.touch_gesture.origin.y + offset_y,
+        };
+        switch (priv.touch_gesture.update(point)) {
+            .none => {},
+            .scroll => |delta| {
+                self.cancelTouchTimer();
+                self.setTouchPosition(point);
+                const scaled = self.scaledCoordinates(delta.x, delta.y);
+                surface.scrollCallback(scaled.x, scaled.y, .{ .precision = true }) catch |err| {
+                    log.warn("error scrolling touch gesture err={}", .{err});
+                    self.cancelTouch();
+                };
+            },
+            .select => |position| {
+                self.setTouchPosition(position);
+                surface.cursorPosCallback(priv.cursor_pos, .{}) catch |err| {
+                    log.warn("error extending touch selection err={}", .{err});
+                    self.cancelTouch();
+                };
+            },
+        }
+    }
+
+    fn gcTouchUpdate(
+        _: *gtk.GestureDrag,
+        offset_x: f64,
+        offset_y: f64,
+        self: *Self,
+    ) callconv(.c) void {
+        self.updateTouch(offset_x, offset_y);
+    }
+
+    fn gcTouchEnd(
+        gesture: *gtk.GestureDrag,
+        offset_x: f64,
+        offset_y: f64,
+        self: *Self,
+    ) callconv(.c) void {
+        const event = gesture.as(gtk.EventController).getCurrentEvent() orelse {
+            self.cancelTouch();
+            return;
+        };
+        switch (event.getEventType()) {
+            .touch_end, .button_release => {},
+            else => {
+                self.cancelTouch();
+                return;
+            },
+        }
+        self.cancelTouchTimer();
+        self.updateTouch(offset_x, offset_y);
+        const priv = self.private();
+        const surface = priv.core_surface orelse return;
+        switch (priv.touch_gesture.finish()) {
+            .none => {},
+            .release_selection => |point| self.releaseTouchSelection(point),
+            .tap => |point| {
+                self.setTouchPosition(point);
+                const mods = gtk_key.translateMods(event.getModifierState());
+                _ = surface.mouseButtonCallback(.press, .left, mods) catch |err| press_failed: {
+                    log.warn("error pressing touch tap err={}", .{err});
+                    break :press_failed false;
+                };
+                const consumed = surface.mouseButtonCallback(.release, .left, mods) catch |err| {
+                    log.warn("error releasing touch tap err={}", .{err});
+                    return;
+                };
+                if (!consumed and !surface.hasSelection()) _ = self.showOnScreenKeyboard(event);
+            },
+        }
+    }
+
+    fn gcTouchCancel(
+        _: *gtk.Gesture,
+        _: ?*gdk.EventSequence,
+        self: *Self,
+    ) callconv(.c) void {
+        self.cancelTouch();
+    }
+
     fn gcMouseDown(
         gesture: *gtk.GestureClick,
         _: c_int,
@@ -2928,6 +3103,8 @@ pub const Surface = extern struct {
         self: *Self,
     ) callconv(.c) void {
         const event = gesture.as(gtk.EventController).getCurrentEvent() orelse return;
+        if (isTouchEvent(event)) return;
+        self.cancelTouch();
 
         // Bell stops ringing if any mouse button is pressed.
         self.setBellRinging(false);
@@ -3011,6 +3188,7 @@ pub const Surface = extern struct {
         self: *Self,
     ) callconv(.c) void {
         const event = gesture.as(gtk.EventController).getCurrentEvent() orelse return;
+        if (isTouchEvent(event)) return;
 
         const priv = self.private();
         const surface = priv.core_surface orelse return;
@@ -3064,7 +3242,9 @@ pub const Surface = extern struct {
         self: *Self,
     ) callconv(.c) void {
         const event = ec.as(gtk.EventController).getCurrentEvent() orelse return;
+        if (isTouchEvent(event)) return;
         const priv = self.private();
+        if (priv.touch_gesture.phase != .idle) return;
 
         const scaled = self.scaledCoordinates(x, y);
         const pos: apprt.CursorPos = .{
@@ -3479,6 +3659,7 @@ pub const Surface = extern struct {
         _: *RenderSurface,
         self: *Self,
     ) callconv(.c) void {
+        self.cancelTouch();
         self.updateMapped(false);
         self.updateOcclusion();
     }
@@ -3971,6 +4152,10 @@ pub const Surface = extern struct {
             class.bindTemplateCallback("focus_leave", &ecFocusLeave);
             class.bindTemplateCallback("key_pressed", &ecKeyPressed);
             class.bindTemplateCallback("key_released", &ecKeyReleased);
+            class.bindTemplateCallback("touch_begin", &gcTouchBegin);
+            class.bindTemplateCallback("touch_update", &gcTouchUpdate);
+            class.bindTemplateCallback("touch_end", &gcTouchEnd);
+            class.bindTemplateCallback("touch_cancel", &gcTouchCancel);
             class.bindTemplateCallback("mouse_down", &gcMouseDown);
             class.bindTemplateCallback("mouse_up", &gcMouseUp);
             class.bindTemplateCallback("mouse_motion", &ecMouseMotion);

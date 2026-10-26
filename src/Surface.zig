@@ -174,6 +174,8 @@ selection_scroll_active: bool = false,
 /// always enabled in this state.
 readonly: bool = false,
 
+mouse_selection_override: bool = false,
+
 /// Used to send notifications that long running commands have finished.
 /// Requires that shell integration be active. Should represent a nanosecond
 /// precision timestamp. It does not necessarily need to correspond to the
@@ -3800,7 +3802,8 @@ pub fn contentScaleCallback(self: *Surface, content_scale: apprt.ContentScale) !
 /// Returns true if mouse reporting is enabled both in the config and
 /// the terminal state.
 fn isMouseReporting(self: *const Surface) bool {
-    return self.config.mouse_reporting and
+    return !self.mouse_selection_override and
+        self.config.mouse_reporting and
         self.io.terminal.flags.mouse_event != .none;
 }
 
@@ -4033,7 +4036,9 @@ pub fn mouseButtonCallback(
         // Handle link clicking. We want to do this before we do mouse
         // reporting or any other mouse handling because a successfully
         // clicked link will swallow the event.
-        if (self.mouse.over_link and !self.mouse.selection_gesture.left_click_dragged) {
+        if (!self.mouse_selection_override and self.mouse.over_link and
+            !self.mouse.selection_gesture.left_click_dragged)
+        {
             // We are holding the renderer lock, but this should just be
             // a cached value.
             const pos = release_pos orelse try self.rt_surface.getCursorPos();
@@ -4047,10 +4052,12 @@ pub fn mouseButtonCallback(
         // Handle prompt clicking. If we released our mouse on a prompt
         // and we support some kind of click events, then we need to
         // move to it.
-        if (self.maybePromptClick()) |handled| {
-            if (handled) return true;
-        } else |err| {
-            log.warn("error processing prompt click err={}", .{err});
+        if (!self.mouse_selection_override) {
+            if (self.maybePromptClick()) |handled| {
+                if (handled) return true;
+            } else |err| {
+                log.warn("error processing prompt click err={}", .{err});
+            }
         }
     }
 

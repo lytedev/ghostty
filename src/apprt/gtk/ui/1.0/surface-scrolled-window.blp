@@ -9,6 +9,7 @@ template $GhostttySurfaceScrolledWindow: Adw.Bin {
   // GTK critical errors (and sometimes crashes).
   Adw.Bin {
     Gtk.ScrolledWindow scrolled_window {
+      kinetic-scrolling: false;
       hscrollbar-policy: never;
       vscrollbar-policy: bind $scrollbar_policy(template.config) as <Gtk.PolicyType>;
     }

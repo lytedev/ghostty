@@ -67,6 +67,15 @@ Overlay terminal_page {
       leave => $mouse_leave();
     }
 
+    GestureDrag {
+      touch-only: true;
+      propagation-phase: capture;
+      drag-begin => $touch_begin();
+      drag-update => $touch_update();
+      drag-end => $touch_end();
+      cancel => $touch_cancel();
+    }
+
     GestureClick {
       pressed => $mouse_down();
       released => $mouse_up();
