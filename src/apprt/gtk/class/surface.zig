@@ -2960,6 +2960,12 @@ pub const Surface = extern struct {
             return;
         }
 
+        const scaled = self.scaledCoordinates(x, y);
+        priv.cursor_pos = .{
+            .x = @floatCast(scaled.x),
+            .y = @floatCast(scaled.y),
+        };
+
         const consumed = consumed: {
             const gtk_mods = event.getModifierState();
             const mods = gtk_key.translateMods(gtk_mods);
@@ -3000,8 +3006,8 @@ pub const Surface = extern struct {
     fn gcMouseUp(
         gesture: *gtk.GestureClick,
         _: c_int,
-        _: f64,
-        _: f64,
+        x: f64,
+        y: f64,
         self: *Self,
     ) callconv(.c) void {
         const event = gesture.as(gtk.EventController).getCurrentEvent() orelse return;
@@ -3022,6 +3028,12 @@ pub const Surface = extern struct {
         {
             return;
         }
+
+        const scaled = self.scaledCoordinates(x, y);
+        priv.cursor_pos = .{
+            .x = @floatCast(scaled.x),
+            .y = @floatCast(scaled.y),
+        };
 
         const mods = gtk_key.translateMods(gtk_mods);
         const consumed = surface.mouseButtonCallback(
