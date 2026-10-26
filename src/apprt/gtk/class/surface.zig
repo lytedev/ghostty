@@ -2990,24 +2990,25 @@ pub const Surface = extern struct {
     }
 
     fn touchHold(data: ?*anyopaque) callconv(.c) c_int {
-        const self: *Self = @ptrCast(@alignCast(data orelse return glib.SOURCE_REMOVE));
+        const remove_source = @intFromBool(glib.SOURCE_REMOVE);
+        const self: *Self = @ptrCast(@alignCast(data orelse return remove_source));
         const priv = self.private();
         priv.touch_hold_timer = null;
-        const surface = priv.core_surface orelse return glib.SOURCE_REMOVE;
-        const point = priv.touch_gesture.hold() orelse return glib.SOURCE_REMOVE;
+        const surface = priv.core_surface orelse return remove_source;
+        const point = priv.touch_gesture.hold() orelse return remove_source;
         self.setTouchPosition(point);
         surface.mouse_selection_override = true;
         surface.cursorPosCallback(priv.cursor_pos, .{}) catch |err| {
             log.warn("error positioning touch selection err={}", .{err});
             self.cancelTouch();
-            return glib.SOURCE_REMOVE;
+            return remove_source;
         };
         _ = surface.mouseButtonCallback(.press, .left, .{}) catch |err| {
             log.warn("error starting touch selection err={}", .{err});
             self.cancelTouch();
-            return glib.SOURCE_REMOVE;
+            return remove_source;
         };
-        return glib.SOURCE_REMOVE;
+        return remove_source;
     }
 
     fn updateTouch(self: *Self, offset_x: f64, offset_y: f64) void {
