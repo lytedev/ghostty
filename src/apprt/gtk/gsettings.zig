@@ -5,12 +5,16 @@ const gobject = @import("gobject");
 /// GTK Settings keys with well-defined types.
 pub const Key = enum {
     @"gtk-enable-primary-paste",
+    @"gtk-long-press-time",
+    @"gtk-dnd-drag-threshold",
     @"gtk-xft-dpi",
     @"gtk-font-name",
 
     fn Type(comptime self: Key) type {
         return switch (self) {
             .@"gtk-enable-primary-paste" => bool,
+            .@"gtk-long-press-time" => c_int,
+            .@"gtk-dnd-drag-threshold" => c_int,
             .@"gtk-xft-dpi" => c_int,
             .@"gtk-font-name" => []const u8,
         };
@@ -78,24 +82,32 @@ fn getImpl(settings: *gtk.Settings, allocator: ?std.mem.Allocator, comptime key:
 
 test "Key.Type returns correct types" {
     try std.testing.expectEqual(bool, Key.@"gtk-enable-primary-paste".Type());
+    try std.testing.expectEqual(c_int, Key.@"gtk-long-press-time".Type());
+    try std.testing.expectEqual(c_int, Key.@"gtk-dnd-drag-threshold".Type());
     try std.testing.expectEqual(c_int, Key.@"gtk-xft-dpi".Type());
     try std.testing.expectEqual([]const u8, Key.@"gtk-font-name".Type());
 }
 
 test "Key.requiresAllocation identifies allocating types" {
     try std.testing.expectEqual(false, Key.@"gtk-enable-primary-paste".requiresAllocation());
+    try std.testing.expectEqual(false, Key.@"gtk-long-press-time".requiresAllocation());
+    try std.testing.expectEqual(false, Key.@"gtk-dnd-drag-threshold".requiresAllocation());
     try std.testing.expectEqual(false, Key.@"gtk-xft-dpi".requiresAllocation());
     try std.testing.expectEqual(true, Key.@"gtk-font-name".requiresAllocation());
 }
 
 test "Key.GValueType returns correct GObject types" {
     try std.testing.expectEqual(c_int, Key.@"gtk-enable-primary-paste".GValueType());
+    try std.testing.expectEqual(c_int, Key.@"gtk-long-press-time".GValueType());
+    try std.testing.expectEqual(c_int, Key.@"gtk-dnd-drag-threshold".GValueType());
     try std.testing.expectEqual(c_int, Key.@"gtk-xft-dpi".GValueType());
     try std.testing.expectEqual(?[*:0]const u8, Key.@"gtk-font-name".GValueType());
 }
 
 test "@tagName returns correct GTK property names" {
     try std.testing.expectEqualStrings("gtk-enable-primary-paste", @tagName(Key.@"gtk-enable-primary-paste"));
+    try std.testing.expectEqualStrings("gtk-long-press-time", @tagName(Key.@"gtk-long-press-time"));
+    try std.testing.expectEqualStrings("gtk-dnd-drag-threshold", @tagName(Key.@"gtk-dnd-drag-threshold"));
     try std.testing.expectEqualStrings("gtk-xft-dpi", @tagName(Key.@"gtk-xft-dpi"));
     try std.testing.expectEqualStrings("gtk-font-name", @tagName(Key.@"gtk-font-name"));
 }

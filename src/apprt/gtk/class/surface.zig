@@ -2984,9 +2984,30 @@ pub const Surface = extern struct {
         if (priv.core_surface == null) return;
         self.setBellRinging(false);
         _ = priv.render_surface.as(gtk.Widget).grabFocus();
-        priv.touch_gesture.begin(.{ .x = x, .y = y });
+        priv.touch_gesture.begin(.{ .x = x, .y = y }, touchGestureLimits());
         _ = gesture.as(gtk.Gesture).setState(.claimed);
-        priv.touch_hold_timer = glib.timeoutAdd(TouchGesture.hold_milliseconds, touchHold, self);
+        priv.touch_hold_timer = glib.timeoutAdd(
+            priv.touch_gesture.limits.hold_milliseconds,
+            touchHold,
+            self,
+        );
+    }
+
+    /// The touch gesture timing comes from GtkSettings so that a user who
+    /// enlarged `gtk-long-press-time` for accessibility gets a longer hold
+    /// before selection, and GTK's own long-press gesture and drag threshold
+    /// keep agreeing with this one. Reading both at press time matches how
+    /// GtkGestureLongPress reads its delay, and means a live settings change
+    /// applies to the next touch.
+    fn touchGestureLimits() TouchGesture.Limits {
+        var limits: TouchGesture.Limits = .{};
+        if (gsettings.get(.@"gtk-long-press-time")) |hold_milliseconds| {
+            if (hold_milliseconds >= 0) limits.hold_milliseconds = @intCast(hold_milliseconds);
+        }
+        if (gsettings.get(.@"gtk-dnd-drag-threshold")) |drag_threshold| {
+            if (drag_threshold >= 0) limits.movement_threshold_pixels = @intCast(drag_threshold);
+        }
+        return limits;
     }
 
     fn touchHold(data: ?*anyopaque) callconv(.c) c_int {
