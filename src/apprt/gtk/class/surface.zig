@@ -2961,7 +2961,7 @@ pub const Surface = extern struct {
         switch (self.private().touch_gesture.cancel()) {
             .release_selection => |point| self.releaseTouchSelection(point),
             .none => {},
-            .tap => unreachable,
+            .tap, .secondary_click => unreachable,
         }
     }
 
@@ -3018,18 +3018,59 @@ pub const Surface = extern struct {
         const surface = priv.core_surface orelse return remove_source;
         const point = priv.touch_gesture.hold() orelse return remove_source;
         self.setTouchPosition(point);
+        surface.cursorPosCallback(priv.cursor_pos, .{}) catch |err| {
+            log.warn("error positioning held touch err={}", .{err});
+            self.cancelTouch();
+        };
+        return remove_source;
+    }
+
+    /// A hold that has now moved becomes a selection. The primary button is
+    /// pressed at the held point and the pointer is then moved to where the
+    /// finger is, so the selection anchors where the finger was held instead of
+    /// jumping to wherever it arrived. Pressing here rather than when the hold
+    /// fired is what keeps a held-and-lifted touch free of a stray click before
+    /// its context menu.
+    fn beginTouchSelection(self: *Self, position: TouchGesture.Point) void {
+        const priv = self.private();
+        const surface = priv.core_surface orelse return;
+        self.setTouchPosition(priv.touch_gesture.origin);
         surface.mouse_selection_override = true;
         surface.cursorPosCallback(priv.cursor_pos, .{}) catch |err| {
             log.warn("error positioning touch selection err={}", .{err});
             self.cancelTouch();
-            return remove_source;
+            return;
         };
         _ = surface.mouseButtonCallback(.press, .left, .{}) catch |err| {
             log.warn("error starting touch selection err={}", .{err});
             self.cancelTouch();
-            return remove_source;
+            return;
         };
-        return remove_source;
+        self.setTouchPosition(position);
+        surface.cursorPosCallback(priv.cursor_pos, .{}) catch |err| {
+            log.warn("error extending touch selection err={}", .{err});
+            self.cancelTouch();
+        };
+    }
+
+    /// A held touch that was lifted without dragging asks for the secondary
+    /// click action, which for the default configuration is a context menu at
+    /// the release point. The core applies `right-click-action` on the press and
+    /// reports whether it consumed the event, exactly as it does for the
+    /// physical right button, so the menu is only shown when that setting wants
+    /// a menu.
+    fn touchSecondaryClick(self: *Self, point: TouchGesture.Point, mods: input.Mods) void {
+        const surface = self.private().core_surface orelse return;
+        self.setTouchPosition(point);
+        const consumed = surface.mouseButtonCallback(.press, .right, mods) catch |err| {
+            log.warn("error pressing touch secondary click err={}", .{err});
+            return;
+        };
+        _ = surface.mouseButtonCallback(.release, .right, mods) catch |err| {
+            log.warn("error releasing touch secondary click err={}", .{err});
+            return;
+        };
+        if (!consumed) self.showContextMenu(point.x, point.y);
     }
 
     fn updateTouch(self: *Self, offset_x: f64, offset_y: f64) void {
@@ -3050,6 +3091,7 @@ pub const Surface = extern struct {
                     self.cancelTouch();
                 };
             },
+            .begin_select => |position| self.beginTouchSelection(position),
             .select => |position| {
                 self.setTouchPosition(position);
                 surface.cursorPosCallback(priv.cursor_pos, .{}) catch |err| {
@@ -3093,6 +3135,10 @@ pub const Surface = extern struct {
         switch (priv.touch_gesture.finish()) {
             .none => {},
             .release_selection => |point| self.releaseTouchSelection(point),
+            .secondary_click => |point| self.touchSecondaryClick(
+                point,
+                gtk_key.translateMods(event.getModifierState()),
+            ),
             .tap => |point| {
                 self.setTouchPosition(point);
                 const mods = gtk_key.translateMods(event.getModifierState());
@@ -3181,25 +3227,32 @@ pub const Surface = extern struct {
         // If a right click isn't consumed, mouseButtonCallback selects the hovered
         // word and returns false. We can use this to handle the context menu
         // opening under normal scenarios.
-        if (!consumed and button == .right) {
-            signals.menu.impl.emit(
-                self,
-                null,
-                .{},
-                null,
-            );
+        if (!consumed and button == .right) self.showContextMenu(x, y);
+    }
 
-            const rect: gdk.Rectangle = .{
-                .f_x = @intFromFloat(x),
-                .f_y = @intFromFloat(y),
-                .f_width = 1,
-                .f_height = 1,
-            };
+    /// Opens the context menu pointing at the given widget coordinates. Shared
+    /// by the physical right button and the touch hold gesture so that a touch
+    /// gets the same menu in the same place as a mouse, and so that the
+    /// configured right-click action (which the core applies before this runs)
+    /// decides whether the menu appears at all.
+    fn showContextMenu(self: *Self, x: f64, y: f64) void {
+        signals.menu.impl.emit(
+            self,
+            null,
+            .{},
+            null,
+        );
 
-            const popover = priv.context_menu.as(gtk.Popover);
-            popover.setPointingTo(&rect);
-            popover.popup();
-        }
+        const rect: gdk.Rectangle = .{
+            .f_x = @intFromFloat(x),
+            .f_y = @intFromFloat(y),
+            .f_width = 1,
+            .f_height = 1,
+        };
+
+        const popover = self.private().context_menu.as(gtk.Popover);
+        popover.setPointingTo(&rect);
+        popover.popup();
     }
 
     fn gcMouseUp(

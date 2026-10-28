@@ -23,16 +23,26 @@ pub const Point = struct {
     y: f64,
 };
 
-pub const Phase = enum { idle, pending, scrolling, selecting };
+pub const Phase = enum { idle, pending, scrolling, holding, selecting };
 pub const Action = union(enum) {
     none,
     scroll: Point,
+
+    /// The hold elapsed and the finger has now moved far enough to mean
+    /// selection. The caller presses the primary button at the origin and then
+    /// reports this position, so the selection anchors where the finger was
+    /// held rather than jumping to where it arrived.
+    begin_select: Point,
     select: Point,
 };
 pub const Finish = union(enum) {
     none,
     tap: Point,
     release_selection: Point,
+
+    /// The finger was held and then lifted without dragging, which is how a
+    /// touch asks for a secondary click.
+    secondary_click: Point,
 };
 
 phase: Phase = .idle,
@@ -73,13 +83,24 @@ pub fn update(self: *TouchGesture, position: Point) Action {
             .x = position.x - previous.x,
             .y = position.y - previous.y,
         } },
+        .holding => {
+            if (!self.movedPastMovementThreshold()) return .none;
+            self.phase = .selecting;
+            return .{ .begin_select = position };
+        },
         .selecting => return .{ .select = position },
     }
 }
 
+/// Starts the hold phase and returns the anchor the caller should keep its
+/// cursor at. No button is pressed here: a hold that is lifted without moving
+/// is a secondary click, so pressing the primary button now would put a stray
+/// click in front of the context menu. The primary button is pressed when the
+/// hold turns into a drag instead, which is also the first moment a selection
+/// is visible.
 pub fn hold(self: *TouchGesture) ?Point {
     if (self.phase != .pending) return null;
-    self.phase = .selecting;
+    self.phase = .holding;
     return self.origin;
 }
 
@@ -88,6 +109,7 @@ pub fn finish(self: *TouchGesture) Finish {
     return switch (self.phase) {
         .idle, .scrolling => .none,
         .pending => .{ .tap = self.position },
+        .holding => .{ .secondary_click = self.position },
         .selecting => .{ .release_selection = self.position },
     };
 }
@@ -96,7 +118,7 @@ pub fn cancel(self: *TouchGesture) Finish {
     defer self.phase = .idle;
     return switch (self.phase) {
         .selecting => .{ .release_selection = self.position },
-        .idle, .pending, .scrolling => .none,
+        .idle, .pending, .scrolling, .holding => .none,
     };
 }
 
@@ -163,8 +185,31 @@ test "holding before dragging selects from the original position and never scrol
     gesture.begin(.{ .x = 40, .y = 80 }, .{});
     _ = gesture.update(.{ .x = 42, .y = 83 });
     try expectContract(@as(?Point, .{ .x = 40, .y = 80 }), gesture.hold(), "A hold must anchor selection at the original touch position despite minor finger jitter.");
-    try expectContract(Action{ .select = .{ .x = 100, .y = 140 } }, gesture.update(.{ .x = 100, .y = 140 }), "Moving after a hold must extend selection rather than scroll.");
-    try expectContract(Finish{ .release_selection = .{ .x = 100, .y = 140 } }, gesture.finish(), "Lifting after selection must release the button at the final selection position.");
+    try expectContract(Action{ .begin_select = .{ .x = 100, .y = 140 } }, gesture.update(.{ .x = 100, .y = 140 }), "The first movement past the threshold after a hold must start the selection, so the button is pressed at the held point.");
+    try expectContract(Action{ .select = .{ .x = 120, .y = 160 } }, gesture.update(.{ .x = 120, .y = 160 }), "Later movement after a hold must extend the selection rather than scroll.");
+    try expectContract(Finish{ .release_selection = .{ .x = 120, .y = 160 } }, gesture.finish(), "Lifting after selection must release the button at the final selection position.");
+}
+
+test "a hold pressed and lifted without moving asks for a secondary click" {
+    var gesture: TouchGesture = .{};
+    gesture.begin(.{ .x = 40, .y = 80 }, .{});
+    _ = gesture.hold();
+    try expectContract(Finish{ .secondary_click = .{ .x = 40, .y = 80 } }, gesture.finish(), "Holding and lifting in place is how a touch asks for a context menu, so it must not be reported as a selection release or a plain tap.");
+}
+
+test "a hold with jitter below the threshold is still a secondary click at the release point" {
+    var gesture: TouchGesture = .{};
+    gesture.begin(.{ .x = 40, .y = 80 }, .{});
+    _ = gesture.hold();
+    try expectContract(Action.none, gesture.update(.{ .x = 43, .y = 85 }), "Finger jitter after the hold must not turn a secondary click into a selection.");
+    try expectContract(Finish{ .secondary_click = .{ .x = 43, .y = 85 } }, gesture.finish(), "A held touch lifted within the threshold must open the context menu where the finger left, not at the stale origin.");
+}
+
+test "cancelling a hold releases nothing because no button was pressed yet" {
+    var gesture: TouchGesture = .{};
+    gesture.begin(.{ .x = 40, .y = 80 }, .{});
+    _ = gesture.hold();
+    try expectContract(Finish.none, gesture.cancel(), "A hold presses no button, so cancelling one must not release a button the terminal never saw pressed.");
 }
 
 test "cancelling a pending touch does not click" {
@@ -178,7 +223,8 @@ test "cancelling a selection releases exactly once and resets the next touch" {
     var gesture: TouchGesture = .{};
     gesture.begin(.{ .x = 40, .y = 80 }, .{});
     _ = gesture.hold();
-    try expectContract(Finish{ .release_selection = .{ .x = 40, .y = 80 } }, gesture.cancel(), "Cancelling selection must release its synthetic left button.");
+    _ = gesture.update(.{ .x = 60, .y = 90 });
+    try expectContract(Finish{ .release_selection = .{ .x = 60, .y = 90 } }, gesture.cancel(), "Cancelling selection must release its synthetic left button.");
     try expectContract(Finish.none, gesture.cancel(), "Repeated cancellation must not release the selection twice.");
     gesture.begin(.{ .x = 10, .y = 20 }, .{});
     try expectContract(Finish{ .tap = .{ .x = 10, .y = 20 } }, gesture.finish(), "After cancellation the next short touch must behave as a fresh tap.");
